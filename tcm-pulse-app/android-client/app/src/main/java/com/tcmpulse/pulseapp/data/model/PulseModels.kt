@@ -141,16 +141,19 @@ data class PulseStatistics(
     val recentTrend: String
 )
 
-// 蓝牙设备
-data class BluetoothDevice(
+// 扫描到的蓝牙设备信息
+data class ScannedDeviceInfo(
     val address: String,
-    val name: String?,
+    val name: String,
     val rssi: Int
 )
 
 // 脉象采集状态
 sealed class PulseCollectionState {
     object Idle : PulseCollectionState()
+    /** 正在扫描周边蓝牙设备 */
+    data class DeviceScan(val devices: List<ScannedDeviceInfo>) : PulseCollectionState()
+    /** 已选择设备，正在建立 BLE 连接 */
     object Connecting : PulseCollectionState()
     object Collecting : PulseCollectionState()
     data class Progress(val percent: Int, val quality: Float) : PulseCollectionState()

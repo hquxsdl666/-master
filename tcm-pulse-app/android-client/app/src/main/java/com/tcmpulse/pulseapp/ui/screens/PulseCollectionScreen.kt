@@ -3,7 +3,10 @@ package com.tcmpulse.pulseapp.ui.screens
 import androidx.compose.animation.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -22,6 +25,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tcmpulse.pulseapp.data.model.PulseCollectionState
+import com.tcmpulse.pulseapp.data.model.ScannedDeviceInfo
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -32,6 +36,7 @@ fun PulseCollectionScreen(
     onCancelCollection: () -> Unit,
     onBack: () -> Unit,
     onViewReport: () -> Unit = onBack,
+    onDeviceSelect: (String) -> Unit = {},
     waveformData: List<Float> = emptyList()
 ) {
     Scaffold(
@@ -56,8 +61,15 @@ fun PulseCollectionScreen(
                 is PulseCollectionState.Idle -> {
                     IdleView(onStartCollection = onStartCollection)
                 }
+                is PulseCollectionState.DeviceScan -> {
+                    DeviceScanView(
+                        devices = collectionState.devices,
+                        onDeviceSelect = onDeviceSelect,
+                        onCancel = onCancelCollection
+                    )
+                }
                 is PulseCollectionState.Connecting -> {
-                    ConnectingView()
+                    ConnectingView(onCancel = onCancelCollection)
                 }
                 is PulseCollectionState.Collecting,
                 is PulseCollectionState.Progress -> {
@@ -197,7 +209,7 @@ fun TipItem(text: String) {
 }
 
 @Composable
-fun ConnectingView() {
+fun ConnectingView(onCancel: () -> Unit = {}) {
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -219,6 +231,131 @@ fun ConnectingView() {
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
         )
+        Spacer(modifier = Modifier.height(32.dp))
+        OutlinedButton(onClick = onCancel) {
+            Text("取消")
+        }
+    }
+}
+
+@Composable
+fun DeviceScanView(
+    devices: List<ScannedDeviceInfo>,
+    onDeviceSelect: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        // 标题区
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = "正在扫描蓝牙设备...",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = "请选择您的华为手表",
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (devices.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "未发现设备，请确认手表蓝牙已开启",
+                    fontSize = 14.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    textAlign = TextAlign.Center
+                )
+            }
+        } else {
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(devices) { device ->
+                    DeviceListItem(device = device, onClick = { onDeviceSelect(device.address) })
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        OutlinedButton(
+            onClick = onCancel,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp),
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Text("取消")
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+    }
+}
+
+@Composable
+fun DeviceListItem(device: ScannedDeviceInfo, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Watch,
+                contentDescription = null,
+                modifier = Modifier.size(32.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = device.name,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = device.address,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                )
+            }
+            // RSSI 信号强度指示
+            val signalColor = when {
+                device.rssi >= -60 -> Color(0xFF4CAF50)
+                device.rssi >= -75 -> Color(0xFFFFA726)
+                else -> Color(0xFFEF5350)
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Default.SignalCellularAlt,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = signalColor
+                )
+                Text(
+                    text = "${device.rssi} dBm",
+                    fontSize = 10.sp,
+                    color = signalColor
+                )
+            }
+        }
     }
 }
 

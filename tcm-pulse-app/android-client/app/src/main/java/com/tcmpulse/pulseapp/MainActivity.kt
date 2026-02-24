@@ -1,8 +1,11 @@
 package com.tcmpulse.pulseapp
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +32,27 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: PulseViewModel by viewModels()
 
+    // 动态权限请求（Android 12+ 需要 BLUETOOTH_SCAN / BLUETOOTH_CONNECT；
+    // 低版本需要 ACCESS_FINE_LOCATION 才能扫描 BLE）
+    private val blePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        // 无论结果如何都进入采集流程；WatchBluetoothManager 内部处理无权限情况
+        viewModel.startPulseCollection()
+    }
+
+    fun requestBlePermissionsAndStartScan() {
+        val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT
+            )
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        blePermissionLauncher.launch(perms)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -37,7 +61,10 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    TCMPulseApp(viewModel = viewModel)
+                    TCMPulseApp(
+                        viewModel = viewModel,
+                        onRequestBlePermissions = ::requestBlePermissionsAndStartScan
+                    )
                 }
             }
         }
@@ -45,7 +72,10 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun TCMPulseApp(viewModel: PulseViewModel) {
+fun TCMPulseApp(
+    viewModel: PulseViewModel,
+    onRequestBlePermissions: () -> Unit = {}
+) {
     val navController = rememberNavController()
 
     NavHost(navController = navController, startDestination = "home") {
@@ -66,13 +96,14 @@ fun TCMPulseApp(viewModel: PulseViewModel) {
         composable("pulse_collection") {
             PulseCollectionScreen(
                 collectionState = viewModel.collectionState.value,
-                onStartCollection = { viewModel.startPulseCollection() },
+                onStartCollection = onRequestBlePermissions,
                 onCancelCollection = {
                     viewModel.cancelCollection()
                     navController.popBackStack()
                 },
                 onBack = { navController.popBackStack() },
                 onViewReport = { navController.navigate("pulse_report/latest") },
+                onDeviceSelect = { address -> viewModel.connectToWatch(address) },
                 waveformData = viewModel.waveformData.value
             )
         }
@@ -88,9 +119,7 @@ fun TCMPulseApp(viewModel: PulseViewModel) {
                 recommendations = viewModel.recommendations.value,
                 onBack = { navController.popBackStack() },
                 onShare = { viewModel.shareReport(recordId) },
-                onViewPrescription = {
-                    navController.navigate("prescriptions")
-                }
+                onViewPrescription = { navController.navigate("prescriptions") }
             )
         }
 

@@ -4,35 +4,47 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.tcmpulse.pulseapp.bluetooth.WatchBluetoothManager
+import com.tcmpulse.pulseapp.bluetooth.WatchConnectionState
 import com.tcmpulse.pulseapp.data.model.*
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
-class PulseViewModel @Inject constructor() : ViewModel() {
-    
+class PulseViewModel @Inject constructor(
+    private val watchManager: WatchBluetoothManager
+) : ViewModel() {
+
     // 采集状态
     private val _collectionState = mutableStateOf<PulseCollectionState>(PulseCollectionState.Idle)
     val collectionState: State<PulseCollectionState> = _collectionState
-    
+
     // 波形数据
     private val _waveformData = mutableStateOf<List<Float>>(emptyList())
     val waveformData: State<List<Float>> = _waveformData
-    
+
     // 最近记录
     private val _recentRecords = mutableStateOf<List<PulseRecord>>(emptyList())
     val recentRecords: State<List<PulseRecord>> = _recentRecords
-    
+
     // 健康评分
     private val _healthScore = mutableStateOf(85)
     val healthScore: State<Int> = _healthScore
-    
+
     // 方剂推荐
     private val _recommendations = mutableStateOf<List<PrescriptionRecommendation>>(emptyList())
     val recommendations: State<List<PrescriptionRecommendation>> = _recommendations
-    
+
+    // BLE 连接状态监听 Job
+    private var bleObserveJob: Job? = null
+    // 采集过程 Job
+    private var collectionJob: Job? = null
+    // 采集期间收集到的心率序列
+    private val heartRateSamples = mutableListOf<Int>()
+
     // 模拟方剂数据
     private val mockRecommendations = listOf(
         PrescriptionRecommendation(
@@ -81,7 +93,7 @@ class PulseViewModel @Inject constructor() : ViewModel() {
         )
     )
 
-    // 模拟脉诊记录数据
+    // 模拟历史脉诊记录
     private val mockRecords = listOf(
         PulseRecord(
             id = "1",
@@ -108,143 +120,231 @@ class PulseViewModel @Inject constructor() : ViewModel() {
             signalQuality = java.math.BigDecimal("0.88")
         )
     )
-    
+
     init {
         _recentRecords.value = mockRecords
         _recommendations.value = mockRecommendations
     }
-    
+
+    // ---- 蓝牙流程 ----
+
     /**
-     * 开始脉象采集
+     * 第一步：开始扫描周边蓝牙设备
      */
     fun startPulseCollection() {
-        viewModelScope.launch {
-            _collectionState.value = PulseCollectionState.Connecting
-            delay(1000)
-            
-            _collectionState.value = PulseCollectionState.Collecting
-            
-            // 模拟采集过程
-            var progress = 0
-            while (progress < 100) {
-                delay(600)
-                progress += 5
-                
-                // 更新波形数据
-                _waveformData.value = generateMockWaveform()
-                
-                _collectionState.value = PulseCollectionState.Progress(
-                    percent = progress,
-                    quality = 0.7f + kotlin.random.Random.nextFloat() * 0.25f
-                )
+        heartRateSamples.clear()
+        _waveformData.value = emptyList()
+
+        // 进入"设备扫描"状态，立即显示空列表
+        _collectionState.value = PulseCollectionState.DeviceScan(emptyList())
+        watchManager.startScan()
+
+        // 监听扫描结果
+        bleObserveJob?.cancel()
+        bleObserveJob = viewModelScope.launch {
+            watchManager.scannedDevices.collect { devices ->
+                val current = _collectionState.value
+                if (current is PulseCollectionState.DeviceScan) {
+                    _collectionState.value = PulseCollectionState.DeviceScan(devices)
+                }
             }
-            
-            // 分析中
-            _collectionState.value = PulseCollectionState.Analyzing
-            delay(1500)
-            
-            // 分析完成
-            val result = PulseAnalysisResponse(
-                mainPulse = "弦脉",
-                mainPulseConfidence = java.math.BigDecimal("0.87"),
-                secondaryPulse = "细脉",
-                secondaryPulseConfidence = java.math.BigDecimal("0.65"),
-                pulseRate = 74,
-                pulseFeatures = createMockPulseFeatures(),
-                syndrome = "肝郁气滞",
-                syndromeConfidence = java.math.BigDecimal("0.82"),
-                allProbabilities = emptyList()
-            )
-            
-            _collectionState.value = PulseCollectionState.Success(result)
         }
     }
-    
+
+    /**
+     * 第二步：用户选择设备后连接
+     */
+    fun connectToWatch(address: String) {
+        bleObserveJob?.cancel()
+        watchManager.stopScan()
+        _collectionState.value = PulseCollectionState.Connecting
+
+        // 触发 GATT 连接
+        watchManager.connectToDevice(address)
+
+        // 监听连接状态
+        bleObserveJob = viewModelScope.launch {
+            watchManager.connectionState.collect { state ->
+                when (state) {
+                    is WatchConnectionState.Measuring -> startRealCollection()
+                    is WatchConnectionState.Error -> {
+                        _collectionState.value = PulseCollectionState.Error(state.message)
+                    }
+                    is WatchConnectionState.Disconnected -> {
+                        if (_collectionState.value is PulseCollectionState.Collecting ||
+                            _collectionState.value is PulseCollectionState.Progress
+                        ) {
+                            _collectionState.value =
+                                PulseCollectionState.Error("手表连接已断开，请重新采集")
+                        }
+                    }
+                    else -> {}
+                }
+            }
+        }
+    }
+
+    /**
+     * 第三步：已连接，开始60秒采集
+     */
+    private fun startRealCollection() {
+        collectionJob?.cancel()
+        heartRateSamples.clear()
+        _collectionState.value = PulseCollectionState.Collecting
+
+        collectionJob = viewModelScope.launch {
+            val totalSteps = 20   // 每步3秒，共60秒
+            for (step in 1..totalSteps) {
+                delay(3_000L)
+
+                val hr = watchManager.currentHeartRate.value
+                if (hr in 30..250) {
+                    heartRateSamples.add(hr)
+                }
+
+                // 更新波形
+                _waveformData.value = generateWaveformFromHeartRate(hr)
+
+                val quality = if (hr in 50..120) 0.85f else if (hr in 30..250) 0.60f else 0.30f
+                _collectionState.value = PulseCollectionState.Progress(
+                    percent = step * 100 / totalSteps,
+                    quality = quality
+                )
+            }
+
+            // 分析阶段
+            _collectionState.value = PulseCollectionState.Analyzing
+            delay(1_500L)
+            analyzeAndComplete()
+        }
+    }
+
     /**
      * 取消采集
      */
     fun cancelCollection() {
+        bleObserveJob?.cancel()
+        collectionJob?.cancel()
+        watchManager.disconnect()
         _collectionState.value = PulseCollectionState.Idle
         _waveformData.value = emptyList()
     }
-    
+
+    /**
+     * 基于真实心率样本生成分析结果
+     */
+    private fun analyzeAndComplete() {
+        val avgHr = if (heartRateSamples.isNotEmpty())
+            heartRateSamples.average().toInt()
+        else
+            watchManager.currentHeartRate.value.takeIf { it > 0 } ?: 72
+
+        val (mainPulse, mainConf, syndrome) = classifyPulse(avgHr)
+
+        val result = PulseAnalysisResponse(
+            mainPulse = mainPulse,
+            mainPulseConfidence = java.math.BigDecimal(mainConf.toString()),
+            secondaryPulse = null,
+            secondaryPulseConfidence = null,
+            pulseRate = avgHr,
+            pulseFeatures = createPulseFeaturesFromHR(avgHr),
+            syndrome = syndrome,
+            syndromeConfidence = java.math.BigDecimal("0.80"),
+            allProbabilities = emptyList()
+        )
+
+        _collectionState.value = PulseCollectionState.Success(result)
+        watchManager.disconnect()
+    }
+
+    /** 简单规则分类（后期可替换为 ML 模型调用） */
+    private fun classifyPulse(hr: Int): Triple<String, Double, String?> = when {
+        hr < 60  -> Triple("迟脉", 0.82, "阳虚寒凝")
+        hr <= 90 -> Triple("平和脉", 0.88, null)
+        hr <= 110 -> Triple("数脉", 0.84, "阴虚内热")
+        else     -> Triple("疾脉", 0.79, "阳热亢盛")
+    }
+
     /**
      * 获取记录详情
      */
     fun getRecordDetail(recordId: String?): PulseRecordDetail? {
         if (recordId == null) return null
-        
-        // 模拟返回详情
+        val base = mockRecords.find { it.id == recordId }
         return PulseRecordDetail(
             id = recordId,
             userId = "user1",
             deviceId = "device1",
-            recordTime = java.time.LocalDateTime.now().minusHours(2),
+            recordTime = base?.recordTime ?: java.time.LocalDateTime.now().minusHours(2),
             measurementDuration = 60,
-            signalQuality = java.math.BigDecimal("0.92"),
-            mainPulse = "弦脉",
-            secondaryPulse = "细脉",
-            pulseRate = 74,
-            pulseFeatures = createMockPulseFeatures(),
-            syndrome = "肝郁气滞",
-            syndromeConfidence = java.math.BigDecimal("0.82")
+            signalQuality = base?.signalQuality ?: java.math.BigDecimal("0.92"),
+            mainPulse = base?.mainPulse ?: "平和脉",
+            secondaryPulse = base?.secondaryPulse,
+            pulseRate = base?.pulseRate ?: 72,
+            pulseFeatures = createPulseFeaturesFromHR(base?.pulseRate ?: 72),
+            syndrome = base?.syndrome,
+            syndromeConfidence = base?.confidence
         )
     }
-    
+
     /**
-     * 分享报告
+     * 分享报告（占位）
      */
-    fun shareReport(recordId: String?) {
-        // 实现分享功能
-    }
-    
-    /**
-     * 生成模拟波形数据
-     */
-    private fun generateMockWaveform(): List<Float> {
+    fun shareReport(recordId: String?) {}
+
+    // ---- 辅助方法 ----
+
+    /** 根据实时心率生成类脉冲波形 */
+    private fun generateWaveformFromHeartRate(hr: Int): List<Float> {
         val pi = Math.PI.toFloat()
+        val freq = if (hr > 0) hr / 60.0f else 1.2f
         return List(200) { index ->
             val t = index / 50.0f
-            kotlin.math.sin(t * 2f * pi * 1.2f) * 0.5f +
-            kotlin.math.sin(t * 2f * pi * 2.4f) * 0.25f +
-            (kotlin.random.Random.nextFloat() - 0.5f) * 0.1f
+            val primary = kotlin.math.sin(t * 2f * pi * freq)
+            val dicrotic = kotlin.math.sin(t * 2f * pi * freq * 2f) * 0.15f
+            val noise = (kotlin.random.Random.nextFloat() - 0.5f) * 0.06f
+            // 模拟脉冲峰形：正弦正半段更高
+            val pulse = if (primary > 0) primary * 0.6f else primary * 0.25f
+            pulse + dicrotic + noise
         }
     }
-    
-    /**
-     * 创建模拟脉象特征
-     */
-    private fun createMockPulseFeatures(): PulseFeatures {
+
+    private fun createPulseFeaturesFromHR(hr: Int): PulseFeatures {
+        val rateCategory = when {
+            hr < 60  -> "slow"
+            hr <= 90 -> "normal"
+            else     -> "fast"
+        }
         return PulseFeatures(
             position = PositionFeatures(
                 floating = java.math.BigDecimal("0.25"),
-                normal = java.math.BigDecimal("0.65"),
-                deep = java.math.BigDecimal("0.10")
+                normal   = java.math.BigDecimal("0.65"),
+                deep     = java.math.BigDecimal("0.10")
             ),
             rate = RateFeatures(
-                rateValue = 74,
-                category = "normal",
-                rhythmRegularity = java.math.BigDecimal("0.95"),
-                intermittent = false
+                rateValue         = hr,
+                category          = rateCategory,
+                rhythmRegularity  = java.math.BigDecimal("0.95"),
+                intermittent      = false
             ),
             force = ForceFeatures(
-                forceScore = java.math.BigDecimal("0.55"),
+                forceScore        = java.math.BigDecimal("0.55"),
                 systolicAmplitude = java.math.BigDecimal("1.25"),
                 diastolicAmplitude = java.math.BigDecimal("0.35")
             ),
             shape = ShapeFeatures(
-                widthScore = java.math.BigDecimal("0.45"),
+                widthScore  = java.math.BigDecimal("0.45"),
                 lengthScore = java.math.BigDecimal("0.60"),
-                smoothness = java.math.BigDecimal("0.70"),
-                tautness = java.math.BigDecimal("0.75"),
-                fullness = java.math.BigDecimal("0.50"),
-                hollowness = java.math.BigDecimal("0.15")
+                smoothness  = java.math.BigDecimal("0.70"),
+                tautness    = java.math.BigDecimal("0.75"),
+                fullness    = java.math.BigDecimal("0.50"),
+                hollowness  = java.math.BigDecimal("0.15")
             ),
             momentum = MomentumFeatures(
-                risingSlope = java.math.BigDecimal("0.65"),
-                fallingSlope = java.math.BigDecimal("0.45"),
+                risingSlope       = java.math.BigDecimal("0.65"),
+                fallingSlope      = java.math.BigDecimal("0.45"),
                 dicroticNotchDepth = java.math.BigDecimal("0.30"),
-                waveArea = java.math.BigDecimal("125.5")
+                waveArea          = java.math.BigDecimal("125.5")
             )
         )
     }
