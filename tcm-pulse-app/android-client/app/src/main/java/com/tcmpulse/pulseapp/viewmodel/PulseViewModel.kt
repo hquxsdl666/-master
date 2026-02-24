@@ -129,53 +129,83 @@ class PulseViewModel @Inject constructor(
     // ---- 蓝牙流程 ----
 
     /**
-     * 第一步：开始扫描周边蓝牙设备
+     * 第一步：开始 BLE 扫描
+     *
+     * - 广播模式：手表开启「心率广播」后，收到广播数据自动开始采集，无需用户选择设备
+     * - GATT 备用：如果扫到需要 GATT 连接的设备，显示设备列表供用户选择
      */
     fun startPulseCollection() {
         heartRateSamples.clear()
         _waveformData.value = emptyList()
 
-        // 进入"设备扫描"状态，立即显示空列表
         _collectionState.value = PulseCollectionState.DeviceScan(emptyList())
         watchManager.startScan()
 
-        // 监听扫描结果
         bleObserveJob?.cancel()
         bleObserveJob = viewModelScope.launch {
-            watchManager.scannedDevices.collect { devices ->
-                val current = _collectionState.value
-                if (current is PulseCollectionState.DeviceScan) {
-                    _collectionState.value = PulseCollectionState.DeviceScan(devices)
+            // 并行监听两个 Flow
+
+            // ① 监听 GATT 设备列表更新
+            launch {
+                watchManager.scannedDevices.collect { devices ->
+                    val current = _collectionState.value
+                    if (current is PulseCollectionState.DeviceScan) {
+                        _collectionState.value = PulseCollectionState.DeviceScan(devices)
+                    }
+                }
+            }
+
+            // ② 监听连接/广播状态
+            launch {
+                watchManager.connectionState.collect { state ->
+                    when (state) {
+                        // 广播模式：扫描阶段收到心率广播，自动开始采集
+                        is WatchConnectionState.Measuring -> {
+                            if (_collectionState.value is PulseCollectionState.DeviceScan) {
+                                startRealCollection()
+                            }
+                        }
+                        is WatchConnectionState.Error -> {
+                            _collectionState.value = PulseCollectionState.Error(state.message)
+                        }
+                        is WatchConnectionState.Disconnected -> {
+                            val cur = _collectionState.value
+                            if (cur is PulseCollectionState.Collecting || cur is PulseCollectionState.Progress) {
+                                _collectionState.value = PulseCollectionState.Error("手表连接已断开，请重新采集")
+                            }
+                        }
+                        else -> {}
+                    }
                 }
             }
         }
     }
 
     /**
-     * 第二步：用户选择设备后连接
+     * 第二步（GATT 备用路径）：用户从列表选择设备后发起 GATT 连接
      */
     fun connectToWatch(address: String) {
+        // 先取消扫描阶段的监听 Job，建立专用的连接监听
         bleObserveJob?.cancel()
-        watchManager.stopScan()
         _collectionState.value = PulseCollectionState.Connecting
 
-        // 触发 GATT 连接
         watchManager.connectToDevice(address)
 
-        // 监听连接状态
         bleObserveJob = viewModelScope.launch {
             watchManager.connectionState.collect { state ->
                 when (state) {
-                    is WatchConnectionState.Measuring -> startRealCollection()
+                    is WatchConnectionState.Measuring -> {
+                        if (_collectionState.value is PulseCollectionState.Connecting) {
+                            startRealCollection()
+                        }
+                    }
                     is WatchConnectionState.Error -> {
                         _collectionState.value = PulseCollectionState.Error(state.message)
                     }
                     is WatchConnectionState.Disconnected -> {
-                        if (_collectionState.value is PulseCollectionState.Collecting ||
-                            _collectionState.value is PulseCollectionState.Progress
-                        ) {
-                            _collectionState.value =
-                                PulseCollectionState.Error("手表连接已断开，请重新采集")
+                        val cur = _collectionState.value
+                        if (cur is PulseCollectionState.Collecting || cur is PulseCollectionState.Progress) {
+                            _collectionState.value = PulseCollectionState.Error("手表连接已断开，请重新采集")
                         }
                     }
                     else -> {}

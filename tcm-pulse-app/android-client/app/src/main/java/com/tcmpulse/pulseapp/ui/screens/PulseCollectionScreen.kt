@@ -141,7 +141,7 @@ fun IdleView(onStartCollection: () -> Unit) {
         Spacer(modifier = Modifier.height(16.dp))
         
         Text(
-            text = "请确保您的华为WATCH GT4已正确佩戴\n并保持手腕平稳",
+            text = "请确保华为 WATCH GT4 已佩戴\n并已在手表上开启「心率广播」",
             fontSize = 16.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
             textAlign = TextAlign.Center
@@ -244,29 +244,74 @@ fun DeviceScanView(
     onDeviceSelect: (String) -> Unit,
     onCancel: () -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        // 标题区
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(bottom = 16.dp)
+    ) {
+        // 扫描指示器
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
             Spacer(modifier = Modifier.width(12.dp))
             Text(
-                text = "正在扫描蓝牙设备...",
-                fontSize = 18.sp,
+                text = "正在扫描心率广播信号...",
+                fontSize = 17.sp,
                 fontWeight = FontWeight.Medium
             )
         }
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "请选择您的华为手表",
-            fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-        )
+
         Spacer(modifier = Modifier.height(16.dp))
 
-        if (devices.isEmpty()) {
+        // 主要引导卡片：如何开启心率广播
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "请在华为手表上开启心率广播",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                StepItem("1", "在手表上：设置 → 健康监测 → 心率广播 → 开启")
+                StepItem("2", "或通过华为运动健康 App：设备 → 健康管理 → 心率广播")
+                StepItem("3", "开启后 App 将自动检测并开始采集，无需选择设备")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // GATT 备用设备列表
+        if (devices.isNotEmpty()) {
+            Text(
+                text = "或选择以下设备（GATT 连接）",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
+                modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+            )
+            LazyColumn(modifier = Modifier.weight(1f)) {
+                items(devices) { device ->
+                    DeviceListItem(device = device, onClick = { onDeviceSelect(device.address) })
+                }
+            }
+        } else {
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -274,21 +319,15 @@ fun DeviceScanView(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "未发现设备，请确认手表蓝牙已开启",
+                    text = "等待心率广播中...\n请按上方步骤操作后稍候",
                     fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                     textAlign = TextAlign.Center
                 )
             }
-        } else {
-            LazyColumn(modifier = Modifier.weight(1f)) {
-                items(devices) { device ->
-                    DeviceListItem(device = device, onClick = { onDeviceSelect(device.address) })
-                }
-            }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(8.dp))
         OutlinedButton(
             onClick = onCancel,
             modifier = Modifier
@@ -298,7 +337,35 @@ fun DeviceScanView(
         ) {
             Text("取消")
         }
-        Spacer(modifier = Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun StepItem(number: String, text: String) {
+    Row(
+        modifier = Modifier.padding(vertical = 3.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Surface(
+            modifier = Modifier.size(20.dp),
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.primary
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = number,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = text,
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+        )
     }
 }
 
