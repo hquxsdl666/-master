@@ -33,7 +33,55 @@ class PulseViewModel @Inject constructor() : ViewModel() {
     private val _recommendations = mutableStateOf<List<PrescriptionRecommendation>>(emptyList())
     val recommendations: State<List<PrescriptionRecommendation>> = _recommendations
     
-    // 模拟数据
+    // 模拟方剂数据
+    private val mockRecommendations = listOf(
+        PrescriptionRecommendation(
+            prescriptionId = 1L,
+            name = "逍遥散",
+            composition = listOf(
+                HerbDosage("柴胡", "10g", "君药"),
+                HerbDosage("白芍", "10g", "臣药"),
+                HerbDosage("当归", "10g", "臣药"),
+                HerbDosage("茯苓", "15g", "佐药"),
+                HerbDosage("白术", "10g", "佐药"),
+                HerbDosage("炙甘草", "6g", "使药")
+            ),
+            efficacy = "疏肝解郁，养血调经。用于肝郁血虚，两胁作痛，头痛目眩，神疲食少。",
+            matchScore = java.math.BigDecimal("0.92"),
+            rank = 1
+        ),
+        PrescriptionRecommendation(
+            prescriptionId = 2L,
+            name = "柴胡疏肝散",
+            composition = listOf(
+                HerbDosage("柴胡", "12g", "君药"),
+                HerbDosage("香附", "10g", "臣药"),
+                HerbDosage("川芎", "9g", "臣药"),
+                HerbDosage("枳壳", "9g", "佐药"),
+                HerbDosage("陈皮", "9g", "佐药"),
+                HerbDosage("芍药", "9g", "佐药"),
+                HerbDosage("炙甘草", "6g", "使药")
+            ),
+            efficacy = "疏肝解郁，行气止痛。用于肝气郁滞，胁肋疼痛，情志抑郁易怒。",
+            matchScore = java.math.BigDecimal("0.85"),
+            rank = 2
+        ),
+        PrescriptionRecommendation(
+            prescriptionId = 3L,
+            name = "四君子汤",
+            composition = listOf(
+                HerbDosage("人参", "9g", "君药"),
+                HerbDosage("白术", "9g", "臣药"),
+                HerbDosage("茯苓", "9g", "佐药"),
+                HerbDosage("炙甘草", "6g", "使药")
+            ),
+            efficacy = "益气健脾。用于脾胃气虚，面色萎白，气短乏力，食少便溏。",
+            matchScore = java.math.BigDecimal("0.71"),
+            rank = 3
+        )
+    )
+
+    // 模拟脉诊记录数据
     private val mockRecords = listOf(
         PulseRecord(
             id = "1",
@@ -63,6 +111,7 @@ class PulseViewModel @Inject constructor() : ViewModel() {
     
     init {
         _recentRecords.value = mockRecords
+        _recommendations.value = mockRecommendations
     }
     
     /**

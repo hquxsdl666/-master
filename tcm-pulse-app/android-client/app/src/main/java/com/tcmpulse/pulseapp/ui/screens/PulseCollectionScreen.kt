@@ -31,6 +31,7 @@ fun PulseCollectionScreen(
     onStartCollection: () -> Unit,
     onCancelCollection: () -> Unit,
     onBack: () -> Unit,
+    onViewReport: () -> Unit = onBack,
     waveformData: List<Float> = emptyList()
 ) {
     Scaffold(
@@ -72,7 +73,7 @@ fun PulseCollectionScreen(
                 is PulseCollectionState.Success -> {
                     SuccessView(
                         result = collectionState.result,
-                        onViewReport = onBack
+                        onViewReport = onViewReport
                     )
                 }
                 is PulseCollectionState.Error -> {
