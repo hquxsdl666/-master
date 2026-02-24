@@ -1,0 +1,52 @@
+# Android
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Build outputs
+/tcm-pulse-app/android-client/app/build/
+/tcm-pulse-app/android-client/build/
+/tcm-pulse-app/backend-service/target/
+
+# Gradle
+.gradle/
+/tcm-pulse-app/android-client/.gradle/
+gradle-app.setting
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/gradle-wrapper.jar
+
+# IntelliJ / Android Studio
+*.iml
+.idea/
+*.iws
+*.ipr
+out/
+.idea/modules.xml
+.idea/workspace.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+
+# Local configuration
+local.properties
+keystore.properties
+*.jks
+*.keystore
+
+# macOS
+.DS_Store
+*.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Node.js
+node_modules/
+npm-debug.log
+
+# Log files
+*.log
+
+# Test output
+/tcm-pulse-app/android-client/app/src/androidTest/
