@@ -65,7 +65,8 @@ fun PulseCollectionScreen(
                     ScanningView(
                         devices = collectionState.devices,
                         onDeviceSelect = onDeviceSelect,
-                        onCancel = onCancelCollection
+                        onCancel = onCancelCollection,
+                        gattError = collectionState.gattError
                     )
                 }
                 is PulseCollectionState.Connecting -> {
@@ -207,14 +208,16 @@ fun TipItem(text: String) {
 }
 
 /**
- * 扫描界面：列出已发现的蓝牙设备，用户点击后 GATT 连接；
- * 若手表心率广播已经被检测到，会自动跳过此界面直接开始采集。
+ * 扫描界面：列出已发现的蓝牙设备（仅供参考，无需点击）；
+ * App 被动等待手表心率广播数据，检测到后自动开始采集。
+ * gattError 非空时在界面内联展示 GATT 失败原因。
  */
 @Composable
 fun ScanningView(
     devices: List<ScannedDeviceInfo>,
-    onDeviceSelect: (String) -> Unit,
-    onCancel: () -> Unit
+    onDeviceSelect: (String) -> Unit,   // 保留参数但设备列表不再直接触发 GATT 连接
+    onCancel: () -> Unit,
+    gattError: String? = null
 ) {
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -226,12 +229,12 @@ fun ScanningView(
         Row(verticalAlignment = Alignment.CenterVertically) {
             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
             Spacer(modifier = Modifier.width(10.dp))
-            Text("正在搜索设备...", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("等待心率广播数据...", fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
 
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "点击设备连接；或等待心率广播自动检测",
+            text = "开启手表「心率广播」后将自动开始采集，无需手动连接",
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
             textAlign = TextAlign.Center
@@ -239,71 +242,80 @@ fun ScanningView(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        if (devices.isEmpty()) {
-            // 尚未发现设备 — 引导卡片
+        // GATT 失败时内联提示（不跳全屏 Error，继续等待广播）
+        if (gattError != null) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    containerColor = MaterialTheme.colorScheme.errorContainer
                 )
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("未发现设备，请检查以下设置", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp).padding(top = 2.dp),
+                        tint = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        "① 确保手表已通过「华为运动健康 App」配对\n" +
-                        "② 手表蓝牙已开启\n\n" +
-                        "如何开启心率广播：\n" +
-                        "手表：设置 → 健康监测 → 心率广播 → 开启\n" +
-                        "或 App：设备 → 健康管理 → 心率 → 心率广播 → 开启",
+                        text = gattError,
                         fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
+                        color = MaterialTheme.colorScheme.onErrorContainer
                     )
                 }
             }
-        } else {
-            // 设备列表
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        // 心率广播操作指引
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text("如何开启心率广播", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "方式一（手表端）：\n  设置 → 健康监测 → 心率广播 → 开启\n\n" +
+                    "方式二（华为运动健康 App）：\n  我的 → 设备 → 健康监测 → 心率广播 → 开启",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        if (devices.isNotEmpty()) {
             Text(
-                text = "已发现 ${devices.size} 个设备",
-                fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                text = "已检测到 ${devices.size} 个蓝牙设备",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                 modifier = Modifier
                     .align(Alignment.Start)
-                    .padding(bottom = 6.dp)
+                    .padding(bottom = 4.dp)
             )
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(devices) { device ->
-                    DeviceItem(device = device, onClick = { onDeviceSelect(device.address) })
+                    // 仅显示，不触发 GATT 连接
+                    DeviceItem(device = device, onClick = null)
                 }
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // 心率广播引导（折叠卡片）
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
-                )
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text("如何开启心率广播", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        "手表：设置 → 健康监测 → 心率广播 → 开启\n" +
-                        "（开启后 App 可自动接收数据，无需手动选择）",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
-                    )
-                }
-            }
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
         }
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -321,11 +333,11 @@ fun ScanningView(
 }
 
 @Composable
-fun DeviceItem(device: ScannedDeviceInfo, onClick: () -> Unit) {
+fun DeviceItem(device: ScannedDeviceInfo, onClick: (() -> Unit)? = null) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         shape = RoundedCornerShape(12.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
@@ -363,11 +375,14 @@ fun DeviceItem(device: ScannedDeviceInfo, onClick: () -> Unit) {
                     )
                 }
             }
-            Icon(
-                imageVector = Icons.Default.ChevronRight,
-                contentDescription = "连接",
-                tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-            )
+            // 已配对设备显示"广播检测中"标志，不显示连接箭头
+            if (device.isBonded) {
+                Text(
+                    text = "广播检测中",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                )
+            }
         }
     }
 }

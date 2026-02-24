@@ -158,11 +158,11 @@ class WatchBluetoothManager @Inject constructor(
                 gatt.close()
                 this@WatchBluetoothManager.gatt = null
                 val hint = when (status) {
-                    133 -> "连接失败(133)：手表当前被其他应用占用\n" +
-                            "请退出华为运动健康App后重试，或在手表上开启心率广播"
+                    133 -> "手表被其他应用占用(133)\n请退出华为运动健康 App 后重试\n或在手表开启「心率广播」等待自动采集"
+                    147 -> "手表拒绝第三方直连(147)\n华为手表不支持第三方 GATT 连接\n请在手表开启「心率广播」，App 将自动采集：\n设置 → 健康监测 → 心率广播 → 开启"
                     8   -> "连接失败(8)：连接被设备拒绝，请确认手表蓝牙已开启"
                     22  -> "连接失败(22)：认证失败，请在手表上确认配对"
-                    else -> "连接失败(status=$status)，请重试"
+                    else -> "手表拒绝连接(status=$status)\n请在手表开启「心率广播」后等待自动采集"
                 }
                 _connectionState.value = WatchConnectionState.Error(hint)
                 return

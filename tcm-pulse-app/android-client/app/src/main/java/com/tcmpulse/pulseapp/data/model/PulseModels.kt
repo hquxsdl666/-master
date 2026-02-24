@@ -153,8 +153,11 @@ data class ScannedDeviceInfo(
 // 脉象采集状态
 sealed class PulseCollectionState {
     object Idle : PulseCollectionState()
-    /** 正在扫描 BLE，显示已发现设备列表 */
-    data class Scanning(val devices: List<ScannedDeviceInfo> = emptyList()) : PulseCollectionState()
+    /** 正在扫描 BLE，显示已发现设备列表；gattError 非空时显示 GATT 失败提示 */
+    data class Scanning(
+        val devices: List<ScannedDeviceInfo> = emptyList(),
+        val gattError: String? = null
+    ) : PulseCollectionState()
     /** 正在连接 GATT */
     object Connecting : PulseCollectionState()
     object Collecting : PulseCollectionState()

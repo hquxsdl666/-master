@@ -142,12 +142,20 @@ class PulseViewModel @Inject constructor(
                             _collectionState.value = PulseCollectionState.Connecting
                         }
 
-                        // 连接出错
+                        // GATT 连接失败 → 重启扫描，在扫描界面内联显示错误提示
+                        // 华为手表不支持第三方 GATT，需用心率广播，不跳到全屏 Error
                         state is WatchConnectionState.Error &&
                                 cur !is PulseCollectionState.Progress &&
                                 cur !is PulseCollectionState.Analyzing &&
                                 cur !is PulseCollectionState.Success -> {
-                            _collectionState.value = PulseCollectionState.Error(state.message)
+                            val existingDevices =
+                                (cur as? PulseCollectionState.Scanning)?.devices ?: emptyList()
+                            _collectionState.value = PulseCollectionState.Scanning(
+                                devices = existingDevices,
+                                gattError = state.message
+                            )
+                            // 重启扫描继续等待心率广播
+                            watchManager.startScan()
                         }
 
                         else -> {}
