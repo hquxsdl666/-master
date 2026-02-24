@@ -145,7 +145,9 @@ data class PulseStatistics(
 data class ScannedDeviceInfo(
     val address: String,
     val name: String,
-    val rssi: Int
+    val rssi: Int,
+    /** true = 系统已配对设备（无需扫描，立即可用） */
+    val isBonded: Boolean = false
 )
 
 // 脉象采集状态
