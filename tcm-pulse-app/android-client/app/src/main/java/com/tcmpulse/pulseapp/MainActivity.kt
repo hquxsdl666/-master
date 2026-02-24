@@ -103,7 +103,6 @@ fun TCMPulseApp(
                 },
                 onBack = { navController.popBackStack() },
                 onViewReport = { navController.navigate("pulse_report/latest") },
-                onDeviceSelect = { address -> viewModel.connectToWatch(address) },
                 waveformData = viewModel.waveformData.value
             )
         }

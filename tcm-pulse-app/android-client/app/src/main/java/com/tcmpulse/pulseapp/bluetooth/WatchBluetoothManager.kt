@@ -1,19 +1,12 @@
 package com.tcmpulse.pulseapp.bluetooth
 
 import android.annotation.SuppressLint
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
-import android.os.Build
-import com.tcmpulse.pulseapp.data.model.ScannedDeviceInfo
+import android.os.ParcelUuid
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,40 +15,45 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** BLE 连接状态 */
-sealed class WatchConnectionState {
-    object Idle : WatchConnectionState()
-    object Scanning : WatchConnectionState()
-    object Connecting : WatchConnectionState()
-    object Measuring : WatchConnectionState()
-    object Disconnected : WatchConnectionState()
-    data class Error(val message: String) : WatchConnectionState()
-}
-
 /**
- * 华为手表蓝牙管理器
+ * 华为手表心率广播接收器
  *
- * 与 Web Bluetooth (xinxiu) 相同的连接流程，移植到 Android 原生 API：
- *   requestDevice({services:['heart_rate']})  →  枚举已配对设备 + 无过滤扫描
- *   device.gatt.connect()                     →  connectGatt()
- *   getPrimaryService(0x180D)                 →  getService(HR_SERVICE_UUID)
- *   getCharacteristic(0x2A37)                 →  getCharacteristic(HR_MEASUREMENT_UUID)
- *   char.startNotifications()                 →  setCharacteristicNotification(true) + writeDescriptor
- *   characteristicvaluechanged                →  onCharacteristicChanged
+ * ## 原理
+ * 华为 Watch GT4 第三方 App 无法通过 GATT 直接连接（需 Huawei Link Protocol v2 认证）。
+ * 正确方式是启用手表「心率广播」功能，手表以 BLE Advertisement 持续广播心率，
+ * App 只需扫描广播包即可，**无需建立任何连接**。
  *
- * 设备发现策略（解决扫描不到问题）：
- *   1. 立即枚举系统已配对（Bonded）设备 —— 华为手表通过健康 App 配对后在此直接出现
- *   2. 并行启动无过滤器 BLE 扫描补充未配对设备
- *   3. 连接时优先用 btAdapter.getRemoteDevice(address) —— 对已配对设备无需扫描即可连接
+ * ## 手表开启步骤
+ * 方式一（手表本体）：设置 → 健康监测 → 心率广播 → 开启
+ * 方式二（华为运动健康 App）：设备 → 健康管理 → 心率 → 心率广播 → 开启
+ *
+ * ## 广播数据解析（两种格式均支持）
+ *
+ * ### 格式 A：标准 ServiceData (AD Type 0x16)
+ * UUID：0x180D (Heart Rate Service)
+ * 数据格式与 GATT 特征值 0x2A37 完全相同：
+ *   Byte 0: Flags (bit0=0 UINT8 / bit0=1 UINT16)
+ *   Byte 1: Heart Rate Value (UINT8)  或
+ *   Byte 1-2: Heart Rate Value (UINT16 little-endian)
+ *
+ * ### 格式 B：华为私有 ManufacturerSpecificData (AD Type 0xFF)
+ * Company ID：0x027D (Huawei Technologies Co., Ltd., Bluetooth SIG 注册)
+ * 数据布局（基于社区逆向分析，byte[0]之后为 payload）：
+ *   Byte 0:   子类型标识
+ *   Byte 1:   心率值（UINT8, 范围 30-220 bpm）
+ *   Byte 2+:  其他生命体征或填充数据
  */
 @Singleton
 class WatchBluetoothManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     companion object {
-        val HR_SERVICE_UUID: UUID     = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
-        val HR_MEASUREMENT_UUID: UUID = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")
-        val CCCD_UUID: UUID           = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+        /** 标准 BLE 心率服务 UUID */
+        val HR_SERVICE_PARCEL_UUID: ParcelUuid =
+            ParcelUuid(UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb"))
+
+        /** 华为 BLE 厂商 ID（Bluetooth SIG 注册：Huawei Technologies Co., Ltd.）*/
+        const val HUAWEI_COMPANY_ID = 0x027D
     }
 
     private val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -63,251 +61,176 @@ class WatchBluetoothManager @Inject constructor(
 
     // ---- 对外 StateFlow ----
 
-    private val _connectionState = MutableStateFlow<WatchConnectionState>(WatchConnectionState.Idle)
-    val connectionState: StateFlow<WatchConnectionState> = _connectionState.asStateFlow()
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
-    private val _scannedDevices = MutableStateFlow<List<ScannedDeviceInfo>>(emptyList())
-    val scannedDevices: StateFlow<List<ScannedDeviceInfo>> = _scannedDevices.asStateFlow()
+    /** 当前心率 BPM（0 = 无数据） */
+    private val _heartRate = MutableStateFlow(0)
+    val heartRate: StateFlow<Int> = _heartRate.asStateFlow()
 
-    private val _currentHeartRate = MutableStateFlow(0)
-    val currentHeartRate: StateFlow<Int> = _currentHeartRate.asStateFlow()
+    /** 正在广播的设备名称（用于 UI 显示） */
+    private val _sourceDevice = MutableStateFlow("")
+    val sourceDevice: StateFlow<String> = _sourceDevice.asStateFlow()
 
-    // ---- 内部状态 ----
+    /** 扫描错误信息 */
+    private val _error = MutableStateFlow("")
+    val error: StateFlow<String> = _error.asStateFlow()
 
-    private val foundDevices = mutableMapOf<String, Pair<ScannedDeviceInfo, BluetoothDevice>>()
-    private var gatt: BluetoothGatt? = null
-    private var activeScanCallback: ScanCallback? = null
+    private var scanCallback: ScanCallback? = null
 
-    // ---- 设备发现 ----
+    // ---- 扫描控制 ----
 
     /**
-     * 启动设备发现：
-     * - 立即加载系统已配对设备（isBonded=true），无需等待扫描
-     * - 同时启动无过滤 BLE 扫描，补充附近未配对设备
-     *
-     * 已配对的华为手表会在调用后立即出现在 [scannedDevices] 列表顶部。
+     * 开始扫描 BLE 心率广播。
+     * 不设置 ScanFilter（避免过滤掉华为私有格式），扫描所有附近广播包。
      */
     @SuppressLint("MissingPermission")
     fun startScan() {
-        foundDevices.clear()
-        _scannedDevices.value = emptyList()
-        _currentHeartRate.value = 0
-        _connectionState.value = WatchConnectionState.Scanning
+        if (_isScanning.value) return
 
-        // ① 枚举已配对设备（相当于 Web Bluetooth 选择器里的已知设备）
-        btAdapter?.bondedDevices
-            ?.filter { it.name?.isNotBlank() == true }
-            ?.forEach { device ->
-                val info = ScannedDeviceInfo(
-                    address  = device.address,
-                    name     = device.name ?: return@forEach,
-                    rssi     = 0,          // 已配对设备无实时 RSSI
-                    isBonded = true
-                )
-                foundDevices[device.address] = Pair(info, device)
-            }
+        _heartRate.value = 0
+        _sourceDevice.value = ""
+        _error.value = ""
 
-        publishDeviceList()
-
-        // ② 无过滤 BLE 扫描（不设 ScanFilter，确保能看到所有附近设备）
         val scanner = btAdapter?.bluetoothLeScanner
         if (scanner == null) {
-            if (foundDevices.isEmpty()) {
-                _connectionState.value = WatchConnectionState.Error("蓝牙未开启，请先开启手机蓝牙")
-            }
+            _error.value = "蓝牙未开启，请先开启手机蓝牙"
             return
         }
 
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
+            .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+            .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
             .build()
 
-        activeScanCallback = object : ScanCallback() {
+        scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val device  = result.device
-                val name    = device.name?.takeIf { it.isNotBlank() } ?: return
-                val address = device.address
-
-                // 已配对设备用扫描结果更新 RSSI，未配对设备直接新增
-                val existing = foundDevices[address]
-                if (existing == null || !existing.first.isBonded) {
-                    val info = ScannedDeviceInfo(
-                        address  = address,
-                        name     = name,
-                        rssi     = result.rssi,
-                        isBonded = existing?.first?.isBonded ?: false
-                    )
-                    foundDevices[address] = Pair(info, device)
-                } else {
-                    // 更新已配对设备的 RSSI
-                    val updated = existing.first.copy(rssi = result.rssi)
-                    foundDevices[address] = Pair(updated, device)
-                }
-                publishDeviceList()
+                tryParseHeartRate(result)
             }
 
             override fun onScanFailed(errorCode: Int) {
-                val msg = when (errorCode) {
-                    ScanCallback.SCAN_FAILED_ALREADY_STARTED               -> "扫描已在进行中，请稍候"
-                    ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "扫描注册失败，请重启蓝牙"
-                    ScanCallback.SCAN_FAILED_FEATURE_UNSUPPORTED           -> "本设备不支持 BLE 扫描"
-                    else -> "扫描失败 (errorCode=$errorCode)"
+                _error.value = when (errorCode) {
+                    SCAN_FAILED_ALREADY_STARTED               -> "扫描已在运行"
+                    SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "蓝牙注册失败，请重启蓝牙"
+                    SCAN_FAILED_FEATURE_UNSUPPORTED           -> "设备不支持 BLE"
+                    else -> "扫描失败 (code=$errorCode)"
                 }
-                // 已有已配对设备时不覆盖为 Error
-                if (foundDevices.isEmpty()) {
-                    _connectionState.value = WatchConnectionState.Error(msg)
-                }
+                _isScanning.value = false
             }
         }
 
-        // 无过滤器 startScan —— 和 Web Bluetooth requestDevice 一样，能看到所有设备
-        scanner.startScan(null, settings, activeScanCallback)
+        // 无过滤器扫描，确保收到所有广播包（包括华为私有格式）
+        scanner.startScan(null, settings, scanCallback)
+        _isScanning.value = true
     }
 
     @SuppressLint("MissingPermission")
     fun stopScan() {
-        activeScanCallback?.let { btAdapter?.bluetoothLeScanner?.stopScan(it) }
-        activeScanCallback = null
+        scanCallback?.let { btAdapter?.bluetoothLeScanner?.stopScan(it) }
+        scanCallback = null
+        _isScanning.value = false
     }
 
-    // ---- GATT 连接（与 xinxiu device.gatt.connect() 等价）----
+    // ---- 广播包解析 ----
 
-    /**
-     * 连接指定地址的设备。
-     * 对于已配对设备可直接通过 [btAdapter.getRemoteDevice] 获取，无需依赖扫描结果。
-     */
-    @SuppressLint("MissingPermission")
-    fun connectToDevice(address: String) {
-        stopScan()
+    private fun tryParseHeartRate(result: ScanResult) {
+        val record = result.scanRecord ?: return
 
-        // 优先用 foundDevices，没有则从系统蓝牙适配器直接获取（适用于已配对设备）
-        val bluetoothDevice: BluetoothDevice =
-            foundDevices[address]?.second
-                ?: runCatching { btAdapter?.getRemoteDevice(address) }.getOrNull()
-                ?: run {
-                    _connectionState.value = WatchConnectionState.Error("无法获取设备，请重新扫描")
+        // 格式 A：标准 ServiceData (0x180D) — 与 GATT 0x2A37 相同格式
+        val serviceData = record.getServiceData(HR_SERVICE_PARCEL_UUID)
+        if (serviceData != null && serviceData.isNotEmpty()) {
+            val hr = parseStandardHRMeasurement(serviceData)
+            if (hr > 0) {
+                publishHR(hr, result.device.name ?: result.device.address)
+                return
+            }
+        }
+
+        // 格式 B：华为私有 ManufacturerSpecificData (Company ID = 0x027D)
+        val huaweiData = record.getManufacturerSpecificData(HUAWEI_COMPANY_ID)
+        if (huaweiData != null && huaweiData.isNotEmpty()) {
+            val hr = parseHuaweiManufacturerData(huaweiData)
+            if (hr > 0) {
+                publishHR(hr, result.device.name ?: result.device.address)
+                return
+            }
+        }
+
+        // 格式 C：兜底 — 遍历所有 ManufacturerSpecificData，
+        // 针对名称含 "HUAWEI"/"GT4"/"GT 4" 的设备尝试启发式解析
+        val devName = result.device.name?.uppercase() ?: return
+        if (devName.contains("HUAWEI") || devName.contains("GT4") ||
+            devName.contains("GT 4") || devName.contains("WATCH")
+        ) {
+            val allMfr = record.manufacturerSpecificData
+            for (i in 0 until allMfr.size()) {
+                val data = allMfr.valueAt(i) ?: continue
+                val hr = heuristicHRSearch(data)
+                if (hr > 0) {
+                    publishHR(hr, result.device.name ?: result.device.address)
                     return
                 }
-
-        _connectionState.value = WatchConnectionState.Connecting
-        gatt = bluetoothDevice.connectGatt(
-            context,
-            false,           // autoConnect=false，手动触发更可靠
-            gattCallback,
-            BluetoothDevice.TRANSPORT_LE
-        )
-    }
-
-    @SuppressLint("MissingPermission")
-    fun disconnect() {
-        stopScan()
-        gatt?.disconnect()
-        gatt?.close()
-        gatt = null
-        _currentHeartRate.value = 0
-        _connectionState.value = WatchConnectionState.Idle
-    }
-
-    // ---- GATT 回调（与 xinxiu characteristicvaluechanged 等价）----
-
-    private val gattCallback = object : BluetoothGattCallback() {
-
-        @SuppressLint("MissingPermission")
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED    -> gatt.discoverServices()
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    gatt.close()
-                    this@WatchBluetoothManager.gatt = null
-                    _currentHeartRate.value = 0
-                    _connectionState.value = WatchConnectionState.Disconnected
-                }
-            }
-        }
-
-        @SuppressLint("MissingPermission")
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                _connectionState.value = WatchConnectionState.Error("服务发现失败 (status=$status)，请重试")
-                return
-            }
-
-            // 与 xinxiu getPrimaryService('heart_rate') 等价
-            val hrChar = gatt.getService(HR_SERVICE_UUID)
-                ?.getCharacteristic(HR_MEASUREMENT_UUID)
-
-            if (hrChar == null) {
-                _connectionState.value = WatchConnectionState.Error(
-                    "未找到心率服务 (0x180D)\n请确认手表已开启持续心率监测"
-                )
-                return
-            }
-
-            // 与 xinxiu char.startNotifications() 等价
-            gatt.setCharacteristicNotification(hrChar, true)
-            val descriptor = hrChar.getDescriptor(CCCD_UUID)
-            if (descriptor != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                } else {
-                    @Suppress("DEPRECATION")
-                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    @Suppress("DEPRECATION")
-                    gatt.writeDescriptor(descriptor)
-                }
-            }
-            _connectionState.value = WatchConnectionState.Measuring
-        }
-
-        // API 33+（与 xinxiu characteristicvaluechanged 等价）
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
-            if (characteristic.uuid == HR_MEASUREMENT_UUID) parseHeartRate(value)
-        }
-
-        // API < 33
-        @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU &&
-                characteristic.uuid == HR_MEASUREMENT_UUID
-            ) {
-                parseHeartRate(characteristic.value)
             }
         }
     }
 
-    // ---- 心率解析（与 xinxiu handleHeartRate 完全一致的字节格式）----
-    //
-    // Byte 0: flags
-    //   bit 0: 0=uint8 格式, 1=uint16 格式
-    // Byte 1 (uint8) 或 Byte 1-2 little-endian (uint16): BPM 值
-
-    private fun parseHeartRate(value: ByteArray) {
-        if (value.isEmpty()) return
-        val flags = value[0].toInt() and 0xFF
+    /**
+     * 标准 BLE Heart Rate Measurement 格式（Bluetooth SIG 0x2A37）
+     *
+     * Byte 0: Flags
+     *   bit0 = 0 → HR 为 UINT8（Byte 1）
+     *   bit0 = 1 → HR 为 UINT16 little-endian（Byte 1-2）
+     */
+    private fun parseStandardHRMeasurement(data: ByteArray): Int {
+        if (data.isEmpty()) return 0
+        val flags = data[0].toInt() and 0xFF
         val hr = if (flags and 0x01 != 0) {
-            if (value.size < 3) return
-            (value[1].toInt() and 0xFF) or ((value[2].toInt() and 0xFF) shl 8)
+            // UINT16
+            if (data.size < 3) return 0
+            (data[1].toInt() and 0xFF) or ((data[2].toInt() and 0xFF) shl 8)
         } else {
-            if (value.size < 2) return
-            value[1].toInt() and 0xFF
+            // UINT8
+            if (data.size < 2) return 0
+            data[1].toInt() and 0xFF
         }
-        if (hr in 30..250) _currentHeartRate.value = hr
+        return if (hr in 30..220) hr else 0
     }
 
-    // ---- 内部工具 ----
+    /**
+     * 华为私有格式（Company ID 0x027D）
+     * 基于社区逆向分析：Byte 1 通常为心率值
+     * 若 Byte 1 不在合理范围，继续尝试 Byte 0、Byte 2
+     */
+    private fun parseHuaweiManufacturerData(data: ByteArray): Int {
+        if (data.isEmpty()) return 0
+        // 按优先级尝试常见偏移
+        for (offset in listOf(1, 0, 2, 3)) {
+            if (offset < data.size) {
+                val candidate = data[offset].toInt() and 0xFF
+                if (candidate in 30..220) return candidate
+            }
+        }
+        return 0
+    }
 
-    private fun publishDeviceList() {
-        _scannedDevices.value = foundDevices.values
-            .map { it.first }
-            // 已配对设备优先显示，其次按信号强度排序
-            .sortedWith(compareByDescending<ScannedDeviceInfo> { it.isBonded }
-                .thenByDescending { it.rssi })
+    /**
+     * 启发式搜索：对华为设备的任意 ManufacturerData，
+     * 找到第一个在生理心率范围内的字节
+     */
+    private fun heuristicHRSearch(data: ByteArray): Int {
+        for (b in data) {
+            val v = b.toInt() and 0xFF
+            if (v in 40..200) return v
+        }
+        return 0
+    }
+
+    private fun publishHR(hr: Int, deviceName: String) {
+        _heartRate.value = hr
+        if (_sourceDevice.value.isEmpty()) {
+            _sourceDevice.value = deviceName
+        }
     }
 }

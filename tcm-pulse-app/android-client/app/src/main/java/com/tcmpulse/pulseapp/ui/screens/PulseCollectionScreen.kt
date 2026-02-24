@@ -3,10 +3,7 @@ package com.tcmpulse.pulseapp.ui.screens
 import androidx.compose.animation.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -25,7 +22,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tcmpulse.pulseapp.data.model.PulseCollectionState
-import com.tcmpulse.pulseapp.data.model.ScannedDeviceInfo
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,7 +32,6 @@ fun PulseCollectionScreen(
     onCancelCollection: () -> Unit,
     onBack: () -> Unit,
     onViewReport: () -> Unit = onBack,
-    onDeviceSelect: (String) -> Unit = {},
     waveformData: List<Float> = emptyList()
 ) {
     Scaffold(
@@ -61,15 +56,11 @@ fun PulseCollectionScreen(
                 is PulseCollectionState.Idle -> {
                     IdleView(onStartCollection = onStartCollection)
                 }
-                is PulseCollectionState.DeviceScan -> {
-                    DeviceScanView(
-                        devices = collectionState.devices,
-                        onDeviceSelect = onDeviceSelect,
+                is PulseCollectionState.Scanning -> {
+                    ScanningView(
+                        sourceDevice = collectionState.sourceDevice,
                         onCancel = onCancelCollection
                     )
-                }
-                is PulseCollectionState.Connecting -> {
-                    ConnectingView(onCancel = onCancelCollection)
                 }
                 is PulseCollectionState.Collecting,
                 is PulseCollectionState.Progress -> {
@@ -208,206 +199,95 @@ fun TipItem(text: String) {
     }
 }
 
+/**
+ * 等待手表心率广播信号的界面
+ * sourceDevice 非空时表示已检测到信号，即将开始采集
+ */
 @Composable
-fun ConnectingView(onCancel: () -> Unit = {}) {
+fun ScanningView(sourceDevice: String, onCancel: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(80.dp),
-            strokeWidth = 6.dp
-        )
-        Spacer(modifier = Modifier.height(24.dp))
-        Text(
-            text = "正在连接手表...",
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "请确保手表在蓝牙范围内",
-            fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-        )
-        Spacer(modifier = Modifier.height(32.dp))
-        OutlinedButton(onClick = onCancel) {
-            Text("取消")
-        }
-    }
-}
+        Spacer(modifier = Modifier.weight(1f))
 
-@Composable
-fun DeviceScanView(
-    devices: List<ScannedDeviceInfo>,
-    onDeviceSelect: (String) -> Unit,
-    onCancel: () -> Unit
-) {
-    val bondedDevices = devices.filter { it.isBonded }
-    val nearbyDevices = devices.filter { !it.isBonded }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(bottom = 16.dp)
-    ) {
-        // 扫描指示器
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
+        // 动态图标
+        Box(
+            modifier = Modifier
+                .size(140.dp)
+                .clip(RoundedCornerShape(70.dp))
+                .background(
+                    Brush.radialGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.04f)
+                        )
+                    )
+                ),
+            contentAlignment = Alignment.Center
         ) {
-            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
-            Spacer(modifier = Modifier.width(12.dp))
+            if (sourceDevice.isEmpty()) {
+                CircularProgressIndicator(modifier = Modifier.size(64.dp), strokeWidth = 4.dp)
+            } else {
+                Icon(
+                    imageVector = Icons.Default.Favorite,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(28.dp))
+
+        if (sourceDevice.isEmpty()) {
+            Text("正在搜索心率广播...", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "正在搜索蓝牙设备...",
-                fontSize = 17.sp,
-                fontWeight = FontWeight.Medium
+                text = "等待华为手表心率广播信号",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
             )
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = "点击设备即可连接，已配对设备将优先显示",
-            fontSize = 13.sp,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (devices.isEmpty()) {
-            // 未找到任何设备时的提示
-            Box(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.BluetoothSearching,
-                        contentDescription = null,
-                        modifier = Modifier.size(56.dp),
-                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "未发现设备",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "请确认：\n① 手机蓝牙已开启\n② 华为手表已通过「华为运动健康」App 配对",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
         } else {
-            LazyColumn(modifier = Modifier.weight(1f)) {
-                // 已配对设备分组
-                if (bondedDevices.isNotEmpty()) {
-                    item {
-                        Text(
-                            text = "已配对设备",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
-                        )
-                    }
-                    items(bondedDevices) { device ->
-                        DeviceListItem(device = device, onClick = { onDeviceSelect(device.address) })
-                    }
-                }
-                // 附近设备分组
-                if (nearbyDevices.isNotEmpty()) {
-                    item {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "附近设备",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp)
-                        )
-                    }
-                    items(nearbyDevices) { device ->
-                        DeviceListItem(device = device, onClick = { onDeviceSelect(device.address) })
-                    }
-                }
+            Text("已检测到心率广播", fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(sourceDevice, fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            Spacer(modifier = Modifier.height(4.dp))
+            Text("即将开始采集...", fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
+        }
+
+        Spacer(modifier = Modifier.height(28.dp))
+
+        // 操作引导卡片
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("如何开启心率广播", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "方式一（手表）：\n  设置 → 健康监测 → 心率广播 → 开启\n\n" +
+                    "方式二（华为运动健康 App）：\n  设备 → 健康管理 → 心率 → 心率广播 → 开启",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
+                )
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.weight(1f))
+
         OutlinedButton(
             onClick = onCancel,
-            modifier = Modifier.fillMaxWidth().height(48.dp),
+            modifier = Modifier.fillMaxWidth(0.7f).height(48.dp),
             shape = RoundedCornerShape(24.dp)
-        ) {
-            Text("取消")
-        }
-    }
-}
+        ) { Text("取消") }
 
-
-@Composable
-fun DeviceListItem(device: ScannedDeviceInfo, onClick: () -> Unit) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Default.Watch,
-                contentDescription = null,
-                modifier = Modifier.size(32.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = device.name, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                Text(
-                    text = device.address,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
-                )
-            }
-            // 已配对设备显示徽标，未配对设备显示信号强度
-            if (device.isBonded) {
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer
-                ) {
-                    Text(
-                        text = "已配对",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Medium,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-            } else if (device.rssi != 0) {
-                val signalColor = when {
-                    device.rssi >= -60 -> Color(0xFF4CAF50)
-                    device.rssi >= -75 -> Color(0xFFFFA726)
-                    else               -> Color(0xFFEF5350)
-                }
-                Text(
-                    text = "${device.rssi} dBm",
-                    fontSize = 11.sp,
-                    color = signalColor
-                )
-            }
-        }
+        Spacer(modifier = Modifier.height(24.dp))
     }
 }
 
@@ -418,7 +298,8 @@ fun CollectingView(
     onCancel: () -> Unit
 ) {
     val progress = if (state is PulseCollectionState.Progress) state.percent else 0
-    val quality = if (state is PulseCollectionState.Progress) state.quality else 0f
+    val quality  = if (state is PulseCollectionState.Progress) state.quality else 0f
+    val bpm      = if (state is PulseCollectionState.Progress) state.bpm else 0
     
     Column(
         modifier = Modifier.fillMaxSize(),
@@ -497,15 +378,35 @@ fun CollectingView(
         Spacer(modifier = Modifier.height(32.dp))
         
         // 进度显示
-        Text(
-            text = "$progress%",
-            fontSize = 48.sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        
+        // 实时心率 + 进度
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(text = "$progress%", fontSize = 42.sp, fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary)
+                Text(text = "进度", fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+            }
+            if (bpm > 0) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Favorite, contentDescription = null,
+                            modifier = Modifier.size(18.dp), tint = Color(0xFFE53935))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(text = "$bpm", fontSize = 42.sp, fontWeight = FontWeight.Bold,
+                            color = Color(0xFFE53935))
+                    }
+                    Text(text = "BPM", fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(8.dp))
-        
+
         // 进度条
         LinearProgressIndicator(
             progress = progress / 100f,
