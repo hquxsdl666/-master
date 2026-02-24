@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tcmpulse.pulseapp.bluetooth.WatchBluetoothManager
+import com.tcmpulse.pulseapp.bluetooth.WatchConnectionState
 import com.tcmpulse.pulseapp.data.model.*
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -97,10 +98,12 @@ class PulseViewModel @Inject constructor(
         _recommendations.value = mockRecommendations
     }
 
-    // ---- BLE 心率广播流程 ----
+    // ---- BLE 流程 ----
 
     /**
-     * 第一步：开始 BLE 扫描，等待手表心率广播信号
+     * 第一步：开始扫描——立即列出已配对设备，同时监听心率广播和 GATT 状态。
+     * 发现心率广播（connectionState=Measuring）时自动开始采集；
+     * 用户从列表选择设备时通过 selectDevice() 发起 GATT 连接。
      */
     fun startPulseCollection() {
         heartRateSamples.clear()
@@ -111,39 +114,73 @@ class PulseViewModel @Inject constructor(
 
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
-            // 监听心率数据，第一次收到时自动开始60秒采集
+
+            // 实时更新设备列表
             launch {
-                watchManager.heartRate.collect { hr ->
-                    if (hr > 0 && _collectionState.value is PulseCollectionState.Scanning) {
-                        val deviceName = watchManager.sourceDevice.value
-                        _collectionState.value = PulseCollectionState.Scanning(deviceName)
-                        startCollection()
+                watchManager.scannedDevices.collect { devices ->
+                    if (_collectionState.value is PulseCollectionState.Scanning) {
+                        _collectionState.value = PulseCollectionState.Scanning(devices)
                     }
                 }
             }
-            // 监听错误
+
+            // 监听连接/心率状态
             launch {
-                watchManager.error.collect { msg ->
-                    if (msg.isNotEmpty() && _collectionState.value is PulseCollectionState.Scanning) {
-                        _collectionState.value = PulseCollectionState.Error(msg)
+                watchManager.connectionState.collect { state ->
+                    val cur = _collectionState.value
+                    when {
+                        // 心率广播或 GATT 已就绪 → 自动开始采集
+                        state is WatchConnectionState.Measuring &&
+                                cur !is PulseCollectionState.Progress &&
+                                cur !is PulseCollectionState.Analyzing -> {
+                            startCollection()
+                        }
+
+                        // GATT 正在连接
+                        state is WatchConnectionState.Connecting &&
+                                cur is PulseCollectionState.Scanning -> {
+                            _collectionState.value = PulseCollectionState.Connecting
+                        }
+
+                        // 连接出错
+                        state is WatchConnectionState.Error &&
+                                cur !is PulseCollectionState.Progress &&
+                                cur !is PulseCollectionState.Analyzing &&
+                                cur !is PulseCollectionState.Success -> {
+                            _collectionState.value = PulseCollectionState.Error(state.message)
+                        }
+
+                        else -> {}
                     }
                 }
             }
-            // 超时：60秒内未收到广播则提示
+
+            // 超时：60秒内既无广播也未连接成功
             delay(60_000L)
             if (_collectionState.value is PulseCollectionState.Scanning) {
-                _collectionState.value = PulseCollectionState.Error(
-                    "60秒内未检测到心率广播\n" +
-                    "请在手表上开启「心率广播」功能：\n" +
-                    "设置 → 健康监测 → 心率广播 → 开启"
-                )
                 watchManager.stopScan()
+                _collectionState.value = PulseCollectionState.Error(
+                    "60秒内未检测到设备心率数据\n\n" +
+                    "请确认：\n" +
+                    "① 手表已佩戴并开启心率监测\n" +
+                    "② 在手表开启「心率广播」：\n" +
+                    "   设置 → 健康监测 → 心率广播 → 开启\n" +
+                    "③ 或从上方列表选择手表手动连接"
+                )
             }
         }
     }
 
     /**
-     * 第二步：检测到广播信号后，采集60秒数据
+     * 用户从设备列表点击选择 → 发起 GATT 连接
+     */
+    fun selectDevice(address: String) {
+        _collectionState.value = PulseCollectionState.Connecting
+        watchManager.connectToDevice(address)
+    }
+
+    /**
+     * 第二步：检测到心率数据后，采集60秒
      */
     private fun startCollection() {
         collectJob?.cancel()
@@ -152,7 +189,7 @@ class PulseViewModel @Inject constructor(
             for (step in 1..totalSteps) {
                 delay(3_000L)
 
-                val hr = watchManager.heartRate.value
+                val hr = watchManager.currentHeartRate.value
                 if (hr in 30..220) heartRateSamples.add(hr)
 
                 _waveformData.value = generateWaveform(hr)
@@ -177,12 +214,13 @@ class PulseViewModel @Inject constructor(
     }
 
     /**
-     * 取消采集
+     * 取消采集，断开连接
      */
     fun cancelCollection() {
         scanJob?.cancel()
         collectJob?.cancel()
         watchManager.stopScan()
+        watchManager.disconnect()
         _collectionState.value = PulseCollectionState.Idle
         _waveformData.value = emptyList()
     }
@@ -193,7 +231,7 @@ class PulseViewModel @Inject constructor(
         val avgHr = if (heartRateSamples.isNotEmpty())
             heartRateSamples.average().toInt()
         else
-            watchManager.heartRate.value.takeIf { it > 0 } ?: 72
+            watchManager.currentHeartRate.value.takeIf { it > 0 } ?: 72
 
         val (mainPulse, conf, syndrome) = classifyPulse(avgHr)
         val result = PulseAnalysisResponse(
@@ -211,10 +249,10 @@ class PulseViewModel @Inject constructor(
     }
 
     private fun classifyPulse(hr: Int): Triple<String, Double, String?> = when {
-        hr < 60  -> Triple("迟脉", 0.82, "阳虚寒凝")
-        hr <= 90 -> Triple("平和脉", 0.88, null)
+        hr < 60   -> Triple("迟脉", 0.82, "阳虚寒凝")
+        hr <= 90  -> Triple("平和脉", 0.88, null)
         hr <= 110 -> Triple("数脉", 0.84, "阴虚内热")
-        else     -> Triple("疾脉", 0.79, "阳热亢盛")
+        else      -> Triple("疾脉", 0.79, "阳热亢盛")
     }
 
     // ---- 记录详情 ----

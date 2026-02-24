@@ -153,8 +153,10 @@ data class ScannedDeviceInfo(
 // 脉象采集状态
 sealed class PulseCollectionState {
     object Idle : PulseCollectionState()
-    /** 正在扫描 BLE 心率广播，等待手表信号 */
-    data class Scanning(val sourceDevice: String = "") : PulseCollectionState()
+    /** 正在扫描 BLE，显示已发现设备列表 */
+    data class Scanning(val devices: List<ScannedDeviceInfo> = emptyList()) : PulseCollectionState()
+    /** 正在连接 GATT */
+    object Connecting : PulseCollectionState()
     object Collecting : PulseCollectionState()
     data class Progress(val percent: Int, val quality: Float, val bpm: Int = 0) : PulseCollectionState()
     object Analyzing : PulseCollectionState()
